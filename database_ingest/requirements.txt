@@ -1,0 +1,9 @@
+duckdb
+pandas
+numpy
+scikit-learn
+textblob
+scipy
+tqdm
+matplotlib
+Pillow
