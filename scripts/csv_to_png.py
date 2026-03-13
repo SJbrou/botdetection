@@ -25,10 +25,22 @@ def df_to_png(df: pd.DataFrame, out_path: str, dpi: int = 200, fontsize: int = 8
         disp[c] = disp[c].apply(lambda x: ("{:.3f}".format(x)) if pd.notnull(x) else "")
 
     nrows, ncols = disp.shape
-    # approximate figure size: width per column, height per row
-    col_width = max(1.0, min(2.5, 0.6 * max(1, ncols)))
+    # Compute column widths based on max content length per column
+    col_max_chars = []
+    for col in disp.columns:
+        max_len = max([len(str(x)) for x in disp[col].fillna("").values] + [len(str(col))])
+        col_max_chars.append(max_len)
+
+    # estimate inches per character; tune to fit typical fonts
+    char_width_in = 0.085
+    min_col_in = 0.4
+    max_col_in = 2.5
+    col_widths = [min(max(char_width_in * m, min_col_in), max_col_in) for m in col_max_chars]
+
     row_height = 0.25
-    figsize = (col_width * ncols, max(2, row_height * (nrows + 1)))
+    total_width = max(6, sum(col_widths))
+    total_height = max(2, row_height * (nrows + 1))
+    figsize = (total_width, total_height)
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.axis("off")
@@ -38,6 +50,12 @@ def df_to_png(df: pd.DataFrame, out_path: str, dpi: int = 200, fontsize: int = 8
         cellLoc='center',
         loc='center'
     )
+    # Try to set reasonable column widths
+    try:
+        # matplotlib.Table supports auto setting; use our computed widths to size the figure instead
+        table.auto_set_font_size(False)
+    except Exception:
+        pass
     table.auto_set_font_size(False)
     table.set_fontsize(fontsize)
     table.scale(1, 1.2)
