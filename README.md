@@ -1,12 +1,3 @@
----
-layout: post
-title: "Online Forum Bot Detection"
-description: "Machine learning to detect misinformation campaings"
-date: 2026-02-12 00:00:00
-tags: ["Projects"]
-background: 'https://as1.ftcdn.net/jpg/02/36/61/94/1000_F_236619445_K8BNQPvZJzR47TEcSO4luwDrXGyP8eUJ.jpg'
----
-
 ## Online Forum Bot Detection
 Concerned about misinformation on online forums, I'm wondering if I could use machine learning to detect bots and targeted misinformation campaings myself.
 

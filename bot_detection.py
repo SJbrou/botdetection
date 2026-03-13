@@ -26,6 +26,49 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+
+def df_to_png(df: pd.DataFrame, filename: str, dpi: int = 200, fontsize: int = 8):
+    """Render a DataFrame to a PNG table with tight layout and minimal whitespace.
+
+    Numeric columns are formatted to 3 decimals.
+    """
+    disp = df.copy()
+    # format numeric columns
+    num_cols = disp.select_dtypes(include=[np.number]).columns
+    for c in num_cols:
+        disp[c] = disp[c].apply(lambda x: ("{:.3f}".format(x)) if pd.notnull(x) else "")
+
+    # compute column widths based on content length
+    col_max_chars = []
+    for col in disp.columns:
+        max_len = max([len(str(x)) for x in disp[col].fillna("").values] + [len(str(col))])
+        col_max_chars.append(max_len)
+
+    char_width_in = 0.085
+    min_col_in = 0.4
+    max_col_in = 2.5
+    col_widths = [min(max(char_width_in * m, min_col_in), max_col_in) for m in col_max_chars]
+
+    nrows = max(1, len(disp))
+    row_height = 0.25
+    total_width = max(6, sum(col_widths))
+    total_height = max(1.6, row_height * (nrows + 1))
+
+    fig, ax = plt.subplots(figsize=(total_width, total_height))
+    ax.axis('off')
+    table = ax.table(
+        cellText=disp.fillna("").values,
+        colLabels=list(disp.columns),
+        cellLoc='center',
+        loc='center'
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(fontsize)
+    table.scale(1, 1.1)
+    plt.tight_layout()
+    fig.savefig(filename, dpi=dpi, bbox_inches='tight', pad_inches=0.04)
+    plt.close(fig)
+
 # Defaults
 DUCKDB_PATH = "data/data.duckdb"
 TABLE_FINAL = "user_features"
@@ -200,12 +243,22 @@ def main(args):
         except Exception:
             pass
     segment_report.to_csv("segment_report.csv", index=False)
+    # Also render PNG (tight whitespace)
+    try:
+        df_to_png(segment_report, "segment_report.png")
+    except Exception as e:
+        print(f"[WARN] Failed to render segment_report.png: {e}")
 
     anomalies = df_feats[df_feats["anomaly_score"] == -1]
     anomaly_report = anomalies[feature_columns + ["anomaly_score_val"]].describe().transpose()
     # Round anomaly report stats to 3 decimals
     anomaly_report = anomaly_report.round(3)
     anomaly_report.to_csv("anomaly_report.csv")
+    try:
+        # reset index so the metric names are visible as a column
+        df_to_png(anomaly_report.reset_index(), "anomaly_report.png")
+    except Exception as e:
+        print(f"[WARN] Failed to render anomaly_report.png: {e}")
 
     # Round numeric columns in the per-user output to 3 decimals for table outputs
     df_out = df_feats.copy()
@@ -213,36 +266,76 @@ def main(args):
     df_out[num_cols] = df_out[num_cols].round(3)
     df_out.to_csv("user_segments_and_anomalies.csv", index=False)
 
+    # --- Identify the segment most likely to be bots using a composite z-score ---
+    try:
+        # Features to use for composite score
+        comp_features = {
+            'anomaly_score_val': 2.0,   # higher (more positive) means more normal; we want negative -> invert later
+            'repeated_ratio': 1.0,
+            'link_ratio': 1.0,
+            'lexical_diversity': -1.0,  # lower lexical diversity is more bot-like
+            'comments_per_day': 1.0,
+            'hour_entropy': -1.0,       # lower entropy suggests automation
+        }
+
+        # Prepare z-scored columns
+        df_comp = df_feats.copy()
+        for col in comp_features.keys():
+            if col not in df_comp.columns:
+                df_comp[col] = 0
+        # compute z-scores safely (handle zero std)
+        for col in comp_features.keys():
+            std = df_comp[col].std(ddof=0)
+            mean = df_comp[col].mean()
+            if std == 0 or np.isnan(std):
+                df_comp[f"z_{col}"] = 0.0
+            else:
+                df_comp[f"z_{col}"] = (df_comp[col] - mean) / std
+
+        # Note: anomaly_score_val: IsolationForest.decision_function yields higher for normal, lower for anomalous.
+        # We will invert its z-score so that higher composite means more bot-like.
+        comp_values = []
+        for col, weight in comp_features.items():
+            zcol = f"z_{col}"
+            if col == 'anomaly_score_val':
+                comp_values.append((-1.0 * df_comp[zcol]) * weight)
+            else:
+                comp_values.append(df_comp[zcol] * weight)
+
+        df_comp['composite_score'] = np.sum(np.vstack(comp_values), axis=0)
+
+        # Aggregate per segment
+        seg_scores = df_comp.groupby('segment')['composite_score'].mean().reset_index()
+        seg_scores = seg_scores.sort_values('composite_score', ascending=False)
+        top_seg = int(seg_scores.iloc[0]['segment'])
+        print(f"[INFO] Segment most likely bots (composite): {top_seg}")
+
+        users_in_top = df_feats[df_feats['segment'] == top_seg]['author_id'].unique().tolist()
+        comments_top_seg = df_comments[df_comments['author_id'].isin(users_in_top)][['author_id', 'content']].copy()
+        comments_top_seg = comments_top_seg.rename(columns={'author_id': 'user_id', 'content': 'comment'})
+
+        if comments_top_seg.empty:
+            print("[WARN] No comments found for top segment; skipping sample generation.")
+        else:
+            sample_comments = comments_top_seg.sample(n=min(100, len(comments_top_seg)), random_state=RANDOM_STATE)
+            sample_comments.to_csv('most_likely_bots_segment_comments.csv', index=False)
+            try:
+                df_to_png(sample_comments.head(10), 'most_likely_bots_segment_comments_top10.png')
+            except Exception as e:
+                print(f"[WARN] Failed to render most_likely_bots_segment_comments_top10.png: {e}")
+    except Exception as e:
+        print(f"[WARN] Failed to generate top-segment comment samples: {e}")
+
     # Optional: export tables as PNG images for quick viewing
     if getattr(args, "save_png", False):
-        def df_to_png(df, filename, row_height=0.25):
-            try:
-                nrows = max(1, len(df))
-                figsize = (10, max(2, nrows * row_height))
-                fig, ax = plt.subplots(figsize=figsize)
-                ax.axis('off')
-                tbl = ax.table(cellText=df.fillna("").values, colLabels=list(df.columns), loc='center')
-                tbl.auto_set_font_size(False)
-                tbl.set_fontsize(8)
-                tbl.scale(1, 1.5)
-                plt.tight_layout()
-                fig.savefig(filename, dpi=200)
-                plt.close(fig)
-            except Exception as e:
-                print(f"[WARN] Failed to render PNG {filename}: {e}")
-
         print("[INFO] Rendering PNGs of reports...")
         try:
-            df_seg_png = segment_report.copy()
-            df_to_png(df_seg_png, "segment_report.png")
+            df_to_png(segment_report.copy(), "segment_report.png")
         except Exception as e:
             print(f"[WARN] segment_report PNG failed: {e}")
 
         try:
-            df_anom_png = anomaly_report.copy()
-            # anomaly_report might be a DataFrame with index as metric names; reset index to show index as column
-            df_anom_png = df_anom_png.reset_index()
-            df_to_png(df_anom_png, "anomaly_report.png")
+            df_to_png(anomaly_report.reset_index().copy(), "anomaly_report.png")
         except Exception as e:
             print(f"[WARN] anomaly_report PNG failed: {e}")
 
